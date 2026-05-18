@@ -9,7 +9,10 @@ Control each app's volume independently. [Shizuku](https://shizuku.rikka.app/) i
 
 Requires Android 13.
 
-![Screenshot](screenshot.png)
+<img width="360" alt="Screenshot" src="https://github.com/user-attachments/assets/7ad75000-a04b-4eba-95d9-1b9bd284d3bd" />
+<img width="360" alt="Screenshot" src="https://github.com/user-attachments/assets/2853d3cc-1fef-4b5f-8e3d-50fef1aee3c3" />
+
+(Screenshot from beta version, download available from action artifacts)
 
 ## Download
 
