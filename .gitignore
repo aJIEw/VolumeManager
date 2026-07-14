@@ -12,3 +12,6 @@ keystore.jks
 
 # Agents related
 AGENTS.md
+
+# Local exported files
+VolumeManager-settings.preferences_pb
