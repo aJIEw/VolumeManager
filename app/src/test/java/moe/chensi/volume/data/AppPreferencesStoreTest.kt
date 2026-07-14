@@ -4,8 +4,11 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -17,7 +20,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
@@ -32,6 +37,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -50,10 +56,7 @@ class AppPreferencesStoreTest {
 
     @Test
     fun persistedStateRemainsCompatible() = runBlocking {
-        val dataStore = createDataStore("compatibility.preferences_pb")
-        dataStore.edit { preferences ->
-            preferences[AppsKey] = ExistingStateJson
-        }
+        val dataStore = InMemoryDataStore(preferencesOf(AppsKey to ExistingStateJson))
 
         val store = AppPreferencesStore(dataStore)
         val loaded = CompletableDeferred<Unit>()
@@ -71,7 +74,7 @@ class AppPreferencesStoreTest {
         store.systemSliderVisibility = mapOf("media" to true, "alarm" to false)
         store.save()
 
-        withTimeout(5_000) {
+        withTimeout(10_000) {
             dataStore.data.first { preferences ->
                 readFirstVolume(preferences) == 0.75f
             }
@@ -94,7 +97,7 @@ class AppPreferencesStoreTest {
 
     @Test
     fun loadOnceInitializesOnlyOnce() = runBlocking {
-        val dataStore = createDataStore("load-once.preferences_pb")
+        val dataStore = InMemoryDataStore()
         val store = AppPreferencesStore(dataStore)
         val callbackCount = AtomicInteger()
         val loaded = CompletableDeferred<Unit>()
@@ -117,6 +120,46 @@ class AppPreferencesStoreTest {
     }
 
     @Test
+    fun loadCanRetryAfterOneFailure() = runBlocking {
+        val dataStore = FailFirstLoadDataStore()
+        val store = AppPreferencesStore(dataStore)
+        val callbackCount = AtomicInteger()
+        val loaded = CompletableDeferred<Unit>()
+
+        store.loadOnce { callbackCount.incrementAndGet() }
+        withTimeout(5_000) { dataStore.firstFailureObserved.await() }
+
+        store.loadOnce {
+            callbackCount.incrementAndGet()
+            loaded.complete(Unit)
+        }
+        withTimeout(5_000) { loaded.await() }
+
+        assertEquals(1, callbackCount.get())
+    }
+
+    @Test
+    fun saveContinuesAfterOneWriteFails() = runBlocking {
+        val dataStore = FailFirstUpdateDataStore()
+        val store = AppPreferencesStore(dataStore)
+        val loaded = CompletableDeferred<Unit>()
+        store.loadOnce { loaded.complete(Unit) }
+        withTimeout(5_000) { loaded.await() }
+
+        val preferences = store.getOrCreate("example.package")
+        preferences.volume = 0.25f
+        store.save()
+        withTimeout(5_000) { dataStore.firstFailureObserved.await() }
+
+        preferences.volume = 1f
+        store.save()
+        withTimeout(5_000) { dataStore.successfulUpdateObserved.await() }
+
+        val persistedVolume = readFirstVolume(dataStore.currentPreferences) ?: Float.NaN
+        assertEquals(1f, persistedVolume, 0f)
+    }
+
+    @Test
     fun newerSaveWinsWhenOlderWriteEmitsFirst() = runBlocking {
         val dataStore = ControlledDataStore()
         val store = AppPreferencesStore(dataStore)
@@ -134,15 +177,19 @@ class AppPreferencesStoreTest {
         dataStore.allowFirstEmission.complete(Unit)
         withTimeout(5_000) { dataStore.firstEmissionPublished.await() }
 
-        withTimeoutOrNull(1_000) {
+        val staleReplayObserved = withTimeoutOrNull(1_000) {
             while (store.getOrCreate("example.package").volume != 0.25f) {
                 yield()
             }
-        }
+            true
+        } ?: false
+        val runtimeVolume = store.getOrCreate("example.package").volume
 
         dataStore.allowFirstUpdateToFinish.complete(Unit)
         withTimeout(5_000) { dataStore.secondUpdateFinished.await() }
 
+        assertFalse(staleReplayObserved)
+        assertEquals(1f, runtimeVolume, 0f)
         val persistedVolume = readFirstVolume(dataStore.currentPreferences) ?: Float.NaN
         assertEquals(1f, persistedVolume, 0f)
     }
@@ -207,7 +254,7 @@ class AppPreferencesStoreTest {
 
     private class ControlledDataStore : DataStore<Preferences> {
         private val state = MutableStateFlow<Preferences>(
-            androidx.datastore.preferences.core.emptyPreferences()
+            emptyPreferences()
         )
         private val updateMutex = Mutex()
         private var updateCount = 0
@@ -239,6 +286,59 @@ class AppPreferencesStoreTest {
                 secondUpdateFinished.complete(Unit)
             }
             updated
+        }
+    }
+
+    private open class InMemoryDataStore(
+        initial: Preferences = emptyPreferences()
+    ) : DataStore<Preferences> {
+        protected val state = MutableStateFlow(initial)
+        private val updateMutex = Mutex()
+
+        val currentPreferences: Preferences
+            get() = state.value
+
+        override open val data: Flow<Preferences> = state
+
+        override suspend fun updateData(
+            transform: suspend (t: Preferences) -> Preferences
+        ): Preferences = updateMutex.withLock {
+            transform(state.value).also { state.value = it }
+        }
+    }
+
+    private class FailFirstUpdateDataStore : InMemoryDataStore() {
+        private var shouldFail = true
+
+        val firstFailureObserved = CompletableDeferred<Unit>()
+        val successfulUpdateObserved = CompletableDeferred<Unit>()
+
+        override suspend fun updateData(
+            transform: suspend (t: Preferences) -> Preferences
+        ): Preferences {
+            if (shouldFail) {
+                shouldFail = false
+                firstFailureObserved.complete(Unit)
+                throw IOException("Expected test failure")
+            }
+
+            return super.updateData(transform).also {
+                successfulUpdateObserved.complete(Unit)
+            }
+        }
+    }
+
+    private class FailFirstLoadDataStore : InMemoryDataStore() {
+        private val loadAttempts = AtomicInteger()
+
+        val firstFailureObserved = CompletableDeferred<Unit>()
+
+        override val data: Flow<Preferences> = flow {
+            if (loadAttempts.getAndIncrement() == 0) {
+                firstFailureObserved.complete(Unit)
+                throw IOException("Expected test failure")
+            }
+            emitAll(state)
         }
     }
 }

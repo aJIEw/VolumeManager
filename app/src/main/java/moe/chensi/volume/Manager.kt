@@ -12,6 +12,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import java.util.concurrent.atomic.AtomicBoolean
 import moe.chensi.volume.data.App
 import moe.chensi.volume.data.AppPreferencesStore
 import moe.chensi.volume.system.AudioPlaybackConfigurationProxy
@@ -48,6 +49,8 @@ class Manager(context: Context, dataStore: DataStore<Preferences>) {
     val notificationManagerProxy = NotificationManagerProxy(context)
 
     private val appPreferencesStore = AppPreferencesStore(dataStore)
+    private val preferencesLoaded = AtomicBoolean(false)
+    private val initialized = AtomicBoolean(false)
     private val _systemSliderVisibility = mutableStateMapOf<String, Boolean>()
     val systemSliderVisibility: Map<String, Boolean>
         get() = _systemSliderVisibility
@@ -150,7 +153,6 @@ class Manager(context: Context, dataStore: DataStore<Preferences>) {
             }
 
             if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
-                _shizukuStatus = ShizukuStatus.Connected
                 start()
             } else {
                 _shizukuStatus = ShizukuStatus.PermissionDenied
@@ -163,7 +165,6 @@ class Manager(context: Context, dataStore: DataStore<Preferences>) {
 
         Shizuku.addRequestPermissionResultListener { _, grantResult ->
             if (grantResult == PackageManager.PERMISSION_GRANTED) {
-                _shizukuStatus = ShizukuStatus.Connected
                 start()
             }
         }
@@ -172,10 +173,28 @@ class Manager(context: Context, dataStore: DataStore<Preferences>) {
     }
 
     private fun start() {
-        appPreferencesStore.loadOnce {
-            _systemSliderVisibility.clear()
-            _systemSliderVisibility.putAll(appPreferencesStore.systemSliderVisibility)
+        if (preferencesLoaded.get()) {
+            onPreferencesLoaded()
+            return
+        }
 
+        appPreferencesStore.loadOnce {
+            preferencesLoaded.set(true)
+            onPreferencesLoaded()
+        }
+    }
+
+    private fun onPreferencesLoaded() {
+        if (!Shizuku.pingBinder()) {
+            _shizukuStatus = ShizukuStatus.Disconnected
+            return
+        }
+
+        _systemSliderVisibility.clear()
+        _systemSliderVisibility.putAll(appPreferencesStore.systemSliderVisibility)
+        _shizukuStatus = ShizukuStatus.Connected
+
+        if (initialized.compareAndSet(false, true)) {
             initialize()
         }
     }

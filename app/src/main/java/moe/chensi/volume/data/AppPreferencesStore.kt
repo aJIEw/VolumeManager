@@ -1,11 +1,12 @@
 package moe.chensi.volume.data
 
-import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.logging.Level
+import java.util.logging.Logger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -18,11 +19,11 @@ import kotlinx.serialization.json.Json
 
 class AppPreferencesStore(private val dataStore: DataStore<Preferences>) {
     companion object {
-        private const val TAG = "AppPreferencesStore"
-
         private val key = stringPreferencesKey("apps")
 
         private val json = Json { ignoreUnknownKeys = true }
+
+        private val logger = Logger.getLogger(AppPreferencesStore::class.java.name)
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -53,7 +54,7 @@ class AppPreferencesStore(private val dataStore: DataStore<Preferences>) {
                     if (error is CancellationException) {
                         throw error
                     }
-                    Log.e(TAG, "Failed to save preferences", error)
+                    logger.log(Level.SEVERE, "Failed to save preferences", error)
                 }
             }
         }
@@ -120,7 +121,7 @@ class AppPreferencesStore(private val dataStore: DataStore<Preferences>) {
                 if (error is CancellationException) {
                     throw error
                 }
-                Log.e(TAG, "Failed to load preferences", error)
+                logger.log(Level.SEVERE, "Failed to load preferences", error)
                 return@launch
             }
 
