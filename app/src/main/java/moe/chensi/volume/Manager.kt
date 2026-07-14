@@ -172,20 +172,11 @@ class Manager(context: Context, dataStore: DataStore<Preferences>) {
     }
 
     private fun start() {
-        appPreferencesStore.track { first ->
-            for ((packageName, index) in appPreferencesStore.indices) {
-                if (!first) {
-                    // Replace with new reference
-                    getApp(packageName)?.setPreferences(appPreferencesStore.values[index])
-                }
-            }
-
+        appPreferencesStore.loadOnce {
             _systemSliderVisibility.clear()
             _systemSliderVisibility.putAll(appPreferencesStore.systemSliderVisibility)
 
-            if (first) {
-                initialize()
-            }
+            initialize()
         }
     }
 }

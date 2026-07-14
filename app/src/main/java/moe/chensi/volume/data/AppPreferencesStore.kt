@@ -1,23 +1,33 @@
 package moe.chensi.volume.data
 
+import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 class AppPreferencesStore(private val dataStore: DataStore<Preferences>) {
     companion object {
+        private const val TAG = "AppPreferencesStore"
+
         private val key = stringPreferencesKey("apps")
 
         private val json = Json { ignoreUnknownKeys = true }
     }
 
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val loadStarted = AtomicBoolean(false)
+    private val saveRequests = Channel<Unit>(Channel.CONFLATED)
 
     @Serializable
     private data class SerializedState(
@@ -28,6 +38,27 @@ class AppPreferencesStore(private val dataStore: DataStore<Preferences>) {
 
     private val lock = Any()
     private var state = SerializedState(mutableListOf(), mutableMapOf())
+
+    init {
+        scope.launch {
+            for (ignored in saveRequests) {
+                try {
+                    val serialized = synchronized(lock) {
+                        json.encodeToString(state)
+                    }
+                    dataStore.edit { preferences ->
+                        preferences[key] = serialized
+                    }
+                } catch (error: Exception) {
+                    if (error is CancellationException) {
+                        throw error
+                    }
+                    Log.e(TAG, "Failed to save preferences", error)
+                }
+            }
+        }
+    }
+
     val values: List<AppPreferences>
         get() = state.values
     val indices: Map<String, Int>
@@ -71,22 +102,29 @@ class AppPreferencesStore(private val dataStore: DataStore<Preferences>) {
             }
         }
 
-    fun track(onChange: (first: Boolean) -> Unit) {
-        var first = true
-
+    fun loadOnce(onLoaded: () -> Unit) {
+        if (!loadStarted.compareAndSet(false, true)) {
+            return
+        }
         scope.launch {
-            dataStore.data.collect { preferences ->
+            try {
+                val preferences = dataStore.data.first()
                 val valueJson = preferences[key]
                 if (valueJson != null) {
                     synchronized(lock) {
                         state = json.decodeFromString<SerializedState>(valueJson)
                     }
                 }
-
-                onChange(first)
-                @Suppress("AssignedValueIsNeverRead")
-                first = false
+            } catch (error: Exception) {
+                loadStarted.set(false)
+                if (error is CancellationException) {
+                    throw error
+                }
+                Log.e(TAG, "Failed to load preferences", error)
+                return@launch
             }
+
+            onLoaded()
         }
     }
 
@@ -105,10 +143,6 @@ class AppPreferencesStore(private val dataStore: DataStore<Preferences>) {
     }
 
     fun save() {
-        scope.launch {
-            dataStore.edit { preferences ->
-                preferences[key] = Json.encodeToString(state)
-            }
-        }
+        saveRequests.trySend(Unit)
     }
 }
