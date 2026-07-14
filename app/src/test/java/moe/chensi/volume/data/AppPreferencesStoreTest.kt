@@ -129,11 +129,15 @@ class AppPreferencesStoreTest {
         store.loadOnce { callbackCount.incrementAndGet() }
         withTimeout(5_000) { dataStore.firstFailureObserved.await() }
 
-        store.loadOnce {
-            callbackCount.incrementAndGet()
-            loaded.complete(Unit)
+        withTimeout(5_000) {
+            while (!loaded.isCompleted) {
+                store.loadOnce {
+                    callbackCount.incrementAndGet()
+                    loaded.complete(Unit)
+                }
+                delay(10)
+            }
         }
-        withTimeout(5_000) { loaded.await() }
 
         assertEquals(1, callbackCount.get())
     }

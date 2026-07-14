@@ -195,7 +195,12 @@ class Manager(context: Context, dataStore: DataStore<Preferences>) {
         _shizukuStatus = ShizukuStatus.Connected
 
         if (initialized.compareAndSet(false, true)) {
-            initialize()
+            try {
+                initialize()
+            } catch (error: Throwable) {
+                initialized.set(false)
+                throw error
+            }
         }
     }
 }
